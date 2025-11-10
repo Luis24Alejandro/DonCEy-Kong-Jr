@@ -1,89 +1,86 @@
-// Client/player.c
+// Ruta: Client/player.c
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
-
 #pragma comment(lib, "Ws2_32.lib")
 
-// Lee exactamente una línea (terminada en '\n'), sin incluir el '\n' en out.
-// Devuelve longitud leída (>0) o -1 si error / 0 si conexión cerrada.
-int recv_line(SOCKET s, char *out, int maxlen) {
-    int total = 0;
-    while (total < maxlen - 1) {
-        char c;
-        int n = recv(s, &c, 1, 0);
-        if (n == 0) return 0;          // conexión cerrada
-        if (n < 0) return -1;          // error
-        if (c == '\n') break;          // fin de línea
-        if (c != '\r') out[total++] = c; // ignora CR si viene CRLF
+volatile int running = 1;
+volatile int myId = 0;
+volatile int lastAck = 0;
+
+int recv_line(SOCKET s, char *out, int maxlen){
+    int total=0;
+    while(total < maxlen-1){
+        char c; int n = recv(s, &c, 1, 0);
+        if(n==0) return 0; if(n<0) return -1;
+        if(c=='\n') break; if(c!='\r') out[total++] = c;
     }
-    out[total] = '\0';
-    return total;
+    out[total]='\0'; return total;
 }
 
-int send_line(SOCKET s, const char *line) {
-    int len = (int)strlen(line);
-    return send(s, line, len, 0);
+DWORD WINAPI reader_thread(LPVOID p){
+    SOCKET s = *(SOCKET*)p;
+    char line[4096];
+    while(running){
+        int n = recv_line(s, line, sizeof(line));
+        if(n <= 0){ printf("[C] Conexión cerrada por el servidor.\n"); running=0; break; }
+        printf("[C]<- %s\n", line);
+
+        if (strncmp(line, "ASSIGN ", 7) == 0) myId = atoi(line + 7);
+        else if (strncmp(line, "STATE ", 6) == 0) {
+            char *seg = strchr(line,' '); if(!seg) continue;
+            seg++; seg = strchr(seg,' '); if(!seg) continue; seg++;
+            char *p = seg;
+            while(p && *p){
+                int id,x,y,ack,consumed=0;
+                if(sscanf(p, "%d %d %d %d;%n", &id,&x,&y,&ack,&consumed)==4){
+                    if(id==myId) lastAck = ack;
+                    p += consumed;
+                } else break;
+            }
+        } else if (strcmp(line, "BYE")==0) { running=0; }
+    }
+    return 0;
 }
 
-int main(void) {
-    WSADATA wsa;
-    SOCKET sock = INVALID_SOCKET;
-    struct sockaddr_in server;
-    char line[1024];
+int send_line(SOCKET s, const char* txt){ return send(s, txt, (int)strlen(txt), 0); }
 
-    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
-        printf("[C] Error WSAStartup (%d)\n", WSAGetLastError());
-        return 1;
-    }
-
-    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        printf("[C] Error socket() (%d)\n", WSAGetLastError());
-        WSACleanup();
-        return 1;
-    }
-
-    memset(&server, 0, sizeof(server));
-    server.sin_family = AF_INET;
-    server.sin_port = htons(5000);
-    server.sin_addr.s_addr = inet_addr("127.0.0.1");
+int main(void){
+    WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    struct sockaddr_in server={0};
+    server.sin_family=AF_INET; server.sin_port=htons(5000);
+    server.sin_addr.s_addr=inet_addr("127.0.0.1");
 
     printf("[C] Conectando a 127.0.0.1:5000 ...\n");
-    if (connect(sock, (struct sockaddr*)&server, sizeof(server)) == SOCKET_ERROR) {
-        printf("[C] Error connect() (%d)\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
-        return 1;
-    }
-    printf("[C] Conectado con éxito.\n");
+    if(connect(sock,(struct sockaddr*)&server,sizeof(server))!=0){ printf("[C] connect() fallo (%d)\n", WSAGetLastError()); return 1; }
+    printf("[C] Conectado.\n");
 
-    // 1) Leer mensaje de bienvenida
-    if (recv_line(sock, line, sizeof(line)) > 0) {
-        printf("[C] Bienvenida: %s\n", line); // debería ser "WELCOME"
-    }
+    HANDLE h = CreateThread(NULL,0,reader_thread,&sock,0,NULL);
 
-    // 2) PING -> PONG
+    send_line(sock, "JOIN Josepa\n");
+    Sleep(200);
+
+    int seq=1; char buf[128];
+    sprintf(buf,"INPUT %d %d %d\n",seq++, 1, 0); send_line(sock, buf); Sleep(150);
+    sprintf(buf,"INPUT %d %d %d\n",seq++, 0, 1); send_line(sock, buf); Sleep(150);
+    sprintf(buf,"INPUT %d %d %d\n",seq++, -1, 0); send_line(sock, buf); Sleep(150);
+
     send_line(sock, "PING\n");
-    if (recv_line(sock, line, sizeof(line)) > 0)
-        printf("[C] Respuesta: %s\n", line);  // "PONG"
 
-    // 3) MOVE -> MOVED ...
-    send_line(sock, "MOVE 1 2 3\n");
-    if (recv_line(sock, line, sizeof(line)) > 0)
-        printf("[C] Respuesta: %s\n", line);  // "MOVED 1 2 3"
+    // >>> Mantener la sesión abierta 5 segundos para que se pueda conectar el espectador
+    Sleep(5000);
 
-    // 4) QUIT -> BYE
     send_line(sock, "QUIT\n");
-    if (recv_line(sock, line, sizeof(line)) > 0)
-        printf("[C] Respuesta: %s\n", line);  // "BYE"
 
-    closesocket(sock);
-    WSACleanup();
+    while(running) Sleep(50);
+    WaitForSingleObject(h, INFINITE);
+    closesocket(sock); WSACleanup();
     printf("[C] Conexión cerrada correctamente.\n");
     return 0;
 }
+
 

@@ -25,27 +25,39 @@ public class ClientHandler implements Runnable {
     @Override
     public void run() {
         try {
-            // Handshake simple (opcional)
             sendLine("WELCOME\n");
 
             String line;
-            // Bucle principal: el servidor SIEMPRE recibe hasta que el cliente cierre o envíe QUIT
             while ((line = in.readLine()) != null) {
-                System.out.println("[JAVA] De " + socket.getRemoteSocketAddress() + ": " + line);
+                System.out.println("[JAVA] <- " + line);
 
-                // Protocolo mínimo por comandos
-                if (line.equalsIgnoreCase("PING")) {
+                if (line.startsWith("JOIN ")) {
+                    server.onJoin(this, line.substring(5).trim());
+                } else if (line.startsWith("INPUT ")) {
+                    // INPUT <seq> <dx> <dy>
+                    String[] t = line.split("\\s+");
+                    if (t.length >= 4) {
+                        int seq = Integer.parseInt(t[1]);
+                        int dx  = Integer.parseInt(t[2]);
+                        int dy  = Integer.parseInt(t[3]);
+                        server.onInput(this, seq, dx, dy);
+                    } else {
+                        sendLine("ERR BAD_INPUT\n");
+                    }
+                } else if (line.startsWith("SPECTATE ")) {
+                    try {
+                        int pid = Integer.parseInt(line.substring(9).trim());
+                        server.onSpectate(this, pid);
+                    } catch (NumberFormatException e) {
+                        sendLine("ERR BAD_SPECTATE\n");
+                    }
+                } else if (line.equalsIgnoreCase("PING")) {
                     sendLine("PONG\n");
-                } else if (line.startsWith("MOVE ")) {
-                    // Ejemplo: MOVE playerId dx dy
-                    // Aquí actualizarías estado del juego y avisarías a los demás:
-                    server.broadcast("MOVED " + line.substring(5) + "\n");
                 } else if (line.equalsIgnoreCase("QUIT")) {
                     sendLine("BYE\n");
                     break;
                 } else {
-                    // Eco por defecto mientras definimos protocolo
-                    sendLine("OK_FROM_JAVA: " + line + "\n");
+                    sendLine("ERR UNKNOWN\n");
                 }
             }
         } catch (IOException e) {
