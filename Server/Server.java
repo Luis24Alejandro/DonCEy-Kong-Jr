@@ -11,7 +11,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class Server {
-    // --- Clase interna para eventos de input ---
+    /* ========= Eventos de input ========= */
     static final class InputEvent {
         final int playerId, seq, dx, dy;
         InputEvent(int playerId, int seq, int dx, int dy) {
@@ -19,7 +19,7 @@ public final class Server {
         }
     }
 
-    // --- Singleton ---
+    /* ========= Singleton ========= */
     private static volatile Server instance;
     private Server() {}
     public static Server getInstance() {
@@ -28,23 +28,21 @@ public final class Server {
         }
         return instance;
     }
-    // --- /Singleton ---
 
+    /* ========= Sockets / pools ========= */
     private ServerSocket serverSocket;
     private final int port = 5000;
-
-    // Pool y clientes
     private final ExecutorService pool = Executors.newCachedThreadPool();
     private final CopyOnWriteArrayList<ClientHandler> clients = new CopyOnWriteArrayList<>();
 
-    // Estado del juego
+    /* ========= Estado básico ========= */
     private final AtomicInteger nextId = new AtomicInteger(1);
-    private final AtomicInteger tickSeq = new AtomicInteger(0); // secuencia de STATE
+    private final AtomicInteger tickSeq = new AtomicInteger(0);
     final ConcurrentHashMap<Integer, Player> players = new ConcurrentHashMap<>();
     final ConcurrentHashMap<ClientHandler, Integer> byClient = new ConcurrentHashMap<>();
     private final ConcurrentLinkedQueue<InputEvent> inputQueue = new ConcurrentLinkedQueue<>();
 
-    // >>> Nuevo: separar audiencias
+    /* ========= Jugadores vs espectadores ========= */
     private final Set<ClientHandler> playerClients =
             Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final ConcurrentHashMap<Integer, CopyOnWriteArrayList<ClientHandler>> spectatorsByPlayer =
@@ -52,18 +50,19 @@ public final class Server {
     private final ConcurrentHashMap<Integer, CopyOnWriteArrayList<ClientHandler>> waitingSpectatorsByPlayer =
             new ConcurrentHashMap<>();
 
-    // Admin: Abstract Factory + entidades
+    /* ========= Plantillas del Admin (Abstract Factory) ========= */
     private final GameElementFactory factory = new DefaultFactory();
-    private final CopyOnWriteArrayList<Enemy> enemies = new CopyOnWriteArrayList<>();
-    private final CopyOnWriteArrayList<Fruit> fruits  = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<Enemy> templateEnemies = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<Fruit> templateFruits  = new CopyOnWriteArrayList<>();
 
-    // Constantes de mapa simples (ajústalas a tu tablero real)
-    private static final int MIN_Y = 0;
-    private static final int MAX_Y = 10;
-    private static final int MIN_X = 0;
-    private static final int MAX_X = 10;
+    /* ========= Sesiones por jugador ========= */
+    private final ConcurrentHashMap<Integer, GameSession> sessions = new ConcurrentHashMap<>();
 
-    // Loop de simulación (Observer)
+    /* ========= Mapa (ajústalo a tu tablero) ========= */
+    private static final int MIN_Y = 0, MAX_Y = 10;
+    private static final int MIN_X = 0, MAX_X = 10;
+
+    /* ========= Loop ========= */
     private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
 
     public void start() throws IOException {
@@ -73,10 +72,7 @@ public final class Server {
         serverSocket.bind(new InetSocketAddress("127.0.0.1", port));
         System.out.println("[JAVA] Servidor escuchando en puerto " + port + " ...");
 
-        // Tick del juego (10 Hz = 100 ms para pruebas)
         ticker.scheduleAtFixedRate(this::tick, 100, 100, TimeUnit.MILLISECONDS);
-
-        // Hilo admin por consola
         new Thread(this::adminLoop, "AdminConsole").start();
 
         while (!serverSocket.isClosed()) {
@@ -84,7 +80,6 @@ public final class Server {
                 Socket socket = serverSocket.accept();
                 socket.setTcpNoDelay(true);
                 System.out.println("[JAVA] Cliente conectado: " + socket.getRemoteSocketAddress());
-
                 ClientHandler handler = new ClientHandler(socket, this);
                 clients.add(handler);
                 pool.submit(handler);
@@ -95,93 +90,111 @@ public final class Server {
         }
     }
 
-    /** Loop de simulación: procesa inputs, avanza enemigos y notifica a jugadores/espectadores. */
+    /* ========= TICK: procesa inputs, simula enemigos y notifica ========= */
     private void tick() {
-        // 1) Consumir inputs
+        // 1) inputs → posiciones (con límites) + ack
         InputEvent ev;
         while ((ev = inputQueue.poll()) != null) {
             Player p = players.get(ev.playerId);
             if (p == null) continue;
-            int nx = p.x + ev.dx;
-            int ny = p.y + ev.dy;
+            int nx = p.x + ev.dx, ny = p.y + ev.dy;
             if (nx < MIN_X) nx = MIN_X; if (nx > MAX_X) nx = MAX_X;
             if (ny < MIN_Y) ny = MIN_Y; if (ny > MAX_Y) ny = MAX_Y;
-            p.x = nx; p.y = ny;
-            p.lastAckSeq = Math.max(p.lastAckSeq, ev.seq);
+            p.x = nx; p.y = ny; p.lastAckSeq = Math.max(p.lastAckSeq, ev.seq);
         }
 
-        // 2) Avanzar enemigos (abstract factory)
-        for (Enemy e : enemies) e.tick(MIN_Y, MAX_Y);
+        // 2) simular enemigos por sesión y chequear eventos de juego
+        for (var e : sessions.entrySet()) {
+            int pid = e.getKey();
+            GameSession s = e.getValue();
+            Player p = players.get(pid);
+            if (p == null) continue;
 
-        // 3) Difundir snapshot
-        int s = tickSeq.incrementAndGet();
+            // avanzar enemigos con “velocidad” de la ronda de ese jugador
+            for (int step = 0; step < Math.max(1, s.enemySpeedSteps); step++) {
+                for (Enemy enemy : s.enemies) enemy.tick(MIN_Y, MAX_Y);
+            }
+
+            // colisiones con enemigos → LOSE (juego termina para ese jugador)
+            boolean hit = s.enemies.stream().anyMatch(en -> en.getX() == p.x && en.getY() == p.y);
+            if (hit) {
+                sendToPlayerAndSpectators(pid, "LOSE " + pid + " " + p.score + "\n");
+                // cerrar sesión de ese jugador
+                endPlayerSession(pid);
+                continue;
+            }
+
+            // recoger frutas → +pts y borrar fruta
+            Iterator<Fruit> it = s.fruits.iterator();
+            while (it.hasNext()) {
+                Fruit f = it.next();
+                if (f.getX() == p.x && f.getY() == p.y) {
+                    p.score += f.getPoints();
+                    it.remove();
+                    sendToPlayerAndSpectators(pid, "SCORE " + pid + " " + p.score + "\n");
+                }
+            }
+
+            // llegar a la meta → subir ronda, subir velocidad, sumar bonus y respawn
+            if (p.x == s.goalX && p.y == s.goalY) {
+                p.score += 100; // bonus de ronda
+                p.round += 1;
+                s.enemySpeedSteps += 1; // más rápido cada ronda
+                p.x = s.spawnX; p.y = s.spawnY;
+                sendToPlayerAndSpectators(pid, "SCORE " + pid + " " + p.score + "\n");
+                sendToPlayerAndSpectators(pid, "ROUND " + pid + " " + p.round + " " + s.enemySpeedSteps + "\n");
+            }
+        }
+
+        // 3) STATE (pos, ack, score, round) a jugadores; OBS a espectadores
+        int t = tickSeq.incrementAndGet();
+
+        // STATE a jugadores
         StringBuilder state = new StringBuilder();
-        state.append("STATE ").append(s).append(' ');
+        state.append("STATE ").append(t).append(' ');
         for (Map.Entry<Integer, Player> e : players.entrySet()) {
             Player p = e.getValue();
             state.append(p.id).append(' ').append(p.x).append(' ').append(p.y).append(' ')
-                 .append(p.lastAckSeq).append(';');
-        }
-        if (!enemies.isEmpty()) {
-            state.append(" | ENEMIES ");
-            for (Enemy enemy : enemies) {
-                state.append(enemy.getType()).append(' ')
-                     .append(enemy.getX()).append(' ')
-                     .append(enemy.getY()).append(';');
-            }
-        }
-        if (!fruits.isEmpty()) {
-            state.append(" | FRUITS ");
-            for (Fruit f : fruits) {
-                state.append(f.getX()).append(' ')
-                     .append(f.getY()).append(' ')
-                     .append(f.getPoints()).append(';');
-            }
+                 .append(p.lastAckSeq).append(' ').append(p.score).append(' ').append(p.round).append(';');
         }
         state.append('\n');
-
-        // >>> Cambiado: enviar STATE solo a jugadores
         for (ClientHandler ch : playerClients) ch.sendLine(state.toString());
 
-        // A espectadores (observer filtrado por jugador)
+        // OBS filtrado por jugador
         players.forEach((pid, p) -> {
             var ls = spectatorsByPlayer.get(pid);
             if (ls != null && !ls.isEmpty()) {
-                String obsLine = "OBS " + pid + " " + s + " "
-                        + p.id + " " + p.x + " " + p.y + " " + p.lastAckSeq + ";\n";
-                for (ClientHandler ch : ls) ch.sendLine(obsLine);
+                String obs = "OBS " + pid + " " + t + " "
+                           + p.id + " " + p.x + " " + p.y + " "
+                           + p.lastAckSeq + " " + p.score + " " + p.round + ";\n";
+                for (ClientHandler ch : ls) ch.sendLine(obs);
             }
         });
     }
 
-    /* ======================= API que llama ClientHandler ======================= */
-
-    // Máximo dos jugadores activos
+    /* ========= API para ClientHandler ========= */
     void onJoin(ClientHandler c, String name) {
-        long activePlayers = players.size();
-        if (activePlayers >= 2) {
-            c.sendLine("ERR MAX_PLAYERS\n");
-            return;
-        }
+        if (players.size() >= 2) { c.sendLine("ERR MAX_PLAYERS\n"); return; }
+
         int id = nextId.getAndIncrement();
         Player p = new Player(id, name);
         players.put(id, p);
         byClient.put(c, id);
-        playerClients.add(c); // ahora este handler recibe STATE
+        playerClients.add(c);
+
+        // crear sesión del jugador con clones de la plantilla admin
+        GameSession s = new GameSession(id);
+        s.loadFromTemplates(templateEnemies, templateFruits);
+        sessions.put(id, s);
 
         c.sendLine("ASSIGN " + id + "\n");
-        System.out.println("[JAVA] JOIN -> id=" + id + " name=" + name);
-
-        // Activar espectadores en espera (si los hay)
+        // si había espectadores en espera: activarlos
         var waiting = waitingSpectatorsByPlayer.remove(id);
         if (waiting != null && !waiting.isEmpty()) {
             var list = spectatorsByPlayer.computeIfAbsent(id, k -> new CopyOnWriteArrayList<>());
-            for (ClientHandler w : waiting) {
-                list.add(w);
-                w.sendLine("OK SPECTATING " + id + "\n");
-            }
-            System.out.println("[JAVA] Activados " + waiting.size() + " espectadores para id=" + id);
+            for (ClientHandler w : waiting) { list.add(w); w.sendLine("OK SPECTATING " + id + "\n"); }
         }
+        System.out.println("[JAVA] JOIN -> id=" + id + " name=" + name);
     }
 
     void onInput(ClientHandler c, int seq, int dx, int dy) {
@@ -191,83 +204,62 @@ public final class Server {
         inputQueue.offer(new InputEvent(id, seq, dx, dy));
     }
 
-    // Máximo dos espectadores por jugador + modo "waiting"
     void onSpectate(ClientHandler c, int playerId) {
         if (players.containsKey(playerId)) {
             var list = spectatorsByPlayer.computeIfAbsent(playerId, k -> new CopyOnWriteArrayList<>());
             if (list.size() >= 2) { c.sendLine("ERR MAX_SPECTATORS\n"); return; }
             list.add(c);
             c.sendLine("OK SPECTATING " + playerId + "\n");
-            System.out.println("[JAVA] SPECTATE -> viewer=" + c + " playerId=" + playerId + " total=" + list.size());
             return;
         }
         var waitList = waitingSpectatorsByPlayer.computeIfAbsent(playerId, k -> new CopyOnWriteArrayList<>());
         waitList.add(c);
         c.sendLine("OK WAITING " + playerId + "\n");
-        System.out.println("[JAVA] SPECTATE (waiting) -> viewer=" + c + " playerId=" + playerId + " totalWaiting=" + waitList.size());
     }
 
     void onQuit(ClientHandler c) {
         Integer id = byClient.remove(c);
         if (id != null) {
-            players.remove(id);
-            playerClients.remove(c);
-
-            // Notificar fin a sus espectadores activos
-            var ls = spectatorsByPlayer.remove(id);
-            if (ls != null) {
-                for (ClientHandler sp : ls) sp.sendLine("OBS_END " + id + "\n");
-            }
-            waitingSpectatorsByPlayer.remove(id);
-            System.out.println("[JAVA] QUIT -> id=" + id);
+            endPlayerSession(id);
         } else {
-            // Era espectador: limpiar de todas las listas
             spectatorsByPlayer.forEach((pid, ls) -> ls.remove(c));
             waitingSpectatorsByPlayer.forEach((pid, ls) -> ls.remove(c));
         }
     }
 
-    /* ================================ Admin =================================== */
+    /* ========= Utilidades ========= */
+    private void endPlayerSession(int playerId) {
+        // avisar a espectadores y limpiar
+        var ls = spectatorsByPlayer.remove(playerId);
+        if (ls != null) for (ClientHandler sp : ls) sp.sendLine("OBS_END " + playerId + "\n");
+        waitingSpectatorsByPlayer.remove(playerId);
 
-    private void adminLoop() {
-        try (Scanner sc = new Scanner(System.in)) {
-            while (true) {
-                String line = sc.nextLine().trim();
-                if (line.equalsIgnoreCase("exit")) { stop(); break; }
-                handleAdminCommand(line);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    // ADMIN CROCODILE <RED|BLUE> <liana> [y]
-    // ADMIN FRUIT CREATE <liana> <y> <points>
-    // ADMIN FRUIT DELETE <liana> <y>
-    private void handleAdminCommand(String line) {
-        try {
-            String[] t = line.split("\\s+");
-            if (t.length >= 4 && "ADMIN".equalsIgnoreCase(t[0]) && "CROCODILE".equalsIgnoreCase(t[1])) {
-                String type = t[2];
-                int liana = Integer.parseInt(t[3]);
-                int y = (t.length > 4) ? Integer.parseInt(t[4]) : MIN_Y;
-                enemies.add(factory.createCrocodile(type, liana, y));
-                System.out.println("[ADMIN] CROCODILE " + type + " @" + liana + "," + y);
-            } else if (t.length >= 6 && "ADMIN".equalsIgnoreCase(t[0]) && "FRUIT".equalsIgnoreCase(t[1]) && "CREATE".equalsIgnoreCase(t[2])) {
-                int l = Integer.parseInt(t[3]), y = Integer.parseInt(t[4]), pts = Integer.parseInt(t[5]);
-                fruits.add(factory.createFruit(l, y, pts));
-                System.out.println("[ADMIN] FRUIT +" + l + "," + y + " pts=" + pts);
-            } else if (t.length >= 5 && "ADMIN".equalsIgnoreCase(t[0]) && "FRUIT".equalsIgnoreCase(t[1]) && "DELETE".equalsIgnoreCase(t[2])) {
-                int l = Integer.parseInt(t[3]), y = Integer.parseInt(t[4]);
-                fruits.removeIf(f -> f.getX() == l && f.getY() == y);
-                System.out.println("[ADMIN] FRUIT -" + l + "," + y);
-            } else {
-                System.out.println("[ADMIN] Comando inválido");
-            }
-        } catch (Exception e) {
-            System.out.println("[ADMIN] Error: " + e.getMessage());
+        // cerrar handler del jugador si sigue conectado
+        ClientHandler toClose = null;
+        for (Map.Entry<ClientHandler,Integer> e : byClient.entrySet()) {
+            if (e.getValue() == playerId) { toClose = e.getKey(); break; }
         }
+        if (toClose != null) {
+            byClient.remove(toClose);
+            playerClients.remove(toClose);
+            toClose.sendLine("BYE\n");
+            toClose.close();
+            clients.remove(toClose);
+        }
+        players.remove(playerId);
+        sessions.remove(playerId);
+        System.out.println("[JAVA] Fin de sesión -> id=" + playerId);
     }
 
-    /* ================================ Utils =================================== */
+    private void sendToPlayerAndSpectators(int playerId, String line) {
+        // a jugador:
+        for (Map.Entry<ClientHandler,Integer> e : byClient.entrySet()) {
+            if (e.getValue() == playerId) e.getKey().sendLine(line);
+        }
+        // a sus espectadores:
+        var ls = spectatorsByPlayer.get(playerId);
+        if (ls != null) for (ClientHandler ch : ls) ch.sendLine(line);
+    }
 
     public void broadcast(String line) {
         for (ClientHandler ch : clients) ch.sendLine(line);
@@ -287,8 +279,44 @@ public final class Server {
             pool.shutdownNow();
             if (serverSocket != null && !serverSocket.isClosed()) serverSocket.close();
             System.out.println("[JAVA] Servidor detenido.");
-        } catch (IOException e) {
-            e.printStackTrace();
+        } catch (IOException e) { e.printStackTrace(); }
+    }
+
+    /* ========= Consola Admin (Abstract Factory) ========= */
+    private void adminLoop() {
+        try (Scanner sc = new Scanner(System.in)) {
+            while (true) {
+                String line = sc.nextLine().trim();
+                if (line.equalsIgnoreCase("exit")) { stop(); break; }
+                handleAdminCommand(line);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // ADMIN CROCODILE <RED|BLUE> <liana> [y]
+    // ADMIN FRUIT CREATE <liana> <y> <points>
+    // ADMIN FRUIT DELETE <liana> <y>
+    private void handleAdminCommand(String line) {
+        try {
+            String[] t = line.split("\\s+");
+            if (t.length >= 4 && "ADMIN".equalsIgnoreCase(t[0]) && "CROCODILE".equalsIgnoreCase(t[1])) {
+                String type = t[2]; int liana = Integer.parseInt(t[3]);
+                int y = (t.length > 4) ? Integer.parseInt(t[4]) : MIN_Y;
+                templateEnemies.add(factory.createCrocodile(type, liana, y));
+                System.out.println("[ADMIN] CROCODILE " + type + " @" + liana + "," + y + " (plantilla)");
+            } else if (t.length >= 6 && "ADMIN".equalsIgnoreCase(t[0]) && "FRUIT".equalsIgnoreCase(t[1]) && "CREATE".equalsIgnoreCase(t[2])) {
+                int l = Integer.parseInt(t[3]), y = Integer.parseInt(t[4]), pts = Integer.parseInt(t[5]);
+                templateFruits.add(factory.createFruit(l, y, pts));
+                System.out.println("[ADMIN] FRUIT +" + l + "," + y + " pts=" + pts + " (plantilla)");
+            } else if (t.length >= 5 && "ADMIN".equalsIgnoreCase(t[0]) && "FRUIT".equalsIgnoreCase(t[1]) && "DELETE".equalsIgnoreCase(t[2])) {
+                int l = Integer.parseInt(t[3]), y = Integer.parseInt(t[4]);
+                templateFruits.removeIf(f -> f.getX()==l && f.getY()==y);
+                System.out.println("[ADMIN] FRUIT -" + l + "," + y + " (plantilla)");
+            } else {
+                System.out.println("[ADMIN] Comando inválido");
+            }
+        } catch (Exception e) {
+            System.out.println("[ADMIN] Error: " + e.getMessage());
         }
     }
 
@@ -297,10 +325,7 @@ public final class Server {
             System.out.println("[JAVA] Shutdown hook → cerrando servidor...");
             Server.getInstance().stop();
         }));
-        try {
-            Server.getInstance().start();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        try { Server.getInstance().start(); } catch (IOException e) { e.printStackTrace(); }
     }
 }
+

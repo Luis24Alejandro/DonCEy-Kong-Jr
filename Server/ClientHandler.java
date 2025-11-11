@@ -28,6 +28,7 @@ public class ClientHandler implements Runnable {
             sendLine("WELCOME\n");
 
             String line;
+            socket.setSoTimeout(20000); // 20 s de inactividad máx. 
             while ((line = in.readLine()) != null) {
                 System.out.println("[JAVA] <- " + line);
 
