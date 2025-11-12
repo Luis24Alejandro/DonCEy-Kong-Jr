@@ -9,9 +9,21 @@ import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-
+/**
+ * Clase principal del servidor
+ * <p>Esta clase implementa el patrón de diseño Singleton para asegurar
+ * que solo exista una instancia del servidor en toda la aplicación.</p>
+ * <p>Se encarga de manejar la lógica central del juego, la gestión de eventos
+ * de entrada y la coordinación de todos los componentes del sistema.</p>
+ * @author [Jose]
+ */
 public final class Server {
     /* ========= Eventos de input ========= */
+    /**
+     * Representa un evento de entrada (input) del jugador.
+     * <p>Contiene la información necesaria para procesar una acción de movimiento
+     * del cliente y su número de secuencia para reconciliación.</p>
+     */
     static final class InputEvent {
         final int playerId, seq, dx, dy;
         InputEvent(int playerId, int seq, int dx, int dy) {
@@ -20,8 +32,22 @@ public final class Server {
     }
 
     /* ========= Singleton ========= */
+    /**
+     * La única instancia de la clase {@code Server} (patrón Singleton).
+     */
     private static volatile Server instance;
+    /**
+     * Constructor privado para prevenir la instanciación externa.
+     */
     private Server() {}
+    /**
+     * Obtiene la única instancia de la clase {@code Server}.
+     *
+     * <p>Utiliza el patrón Double-Checked Locking para garantizar la
+     * seguridad de hilos al inicializar la instancia.</p>
+     *
+     * @return La única instancia disponible del servidor.
+     */
     public static Server getInstance() {
         if (instance == null) {
             synchronized (Server.class) { if (instance == null) instance = new Server(); }
@@ -30,12 +56,17 @@ public final class Server {
     }
 
     /* ========= Sockets / pools ========= */
+    /** El socket principal del servidor, usado para aceptar nuevas conexiones. */
     private ServerSocket serverSocket;
+    /** El puerto TCP donde el servidor está escuchando conexiones. */
     private final int port = 5000;
+    /** Pool de hilos para manejar la comunicación I/O con los {@link ClientHandler}. */
     private final ExecutorService pool = Executors.newCachedThreadPool();
+    /** Lista de todos los manejadores de clientes conectados (jugadores y espectadores). */
     private final CopyOnWriteArrayList<ClientHandler> clients = new CopyOnWriteArrayList<>();
 
     /* ========= Estado básico ========= */
+    /** Contador atómico para generar el siguiente ID único de jugador. */
     private final AtomicInteger nextId = new AtomicInteger(1);
     private final AtomicInteger tickSeq = new AtomicInteger(0);
     final ConcurrentHashMap<Integer, Player> players = new ConcurrentHashMap<>();
@@ -43,6 +74,7 @@ public final class Server {
     private final ConcurrentLinkedQueue<InputEvent> inputQueue = new ConcurrentLinkedQueue<>();
 
     /* ========= Jugadores vs espectadores ========= */
+    /** Conjunto de {@link ClientHandler} que actualmente están actuando como jugadores. */
     private final Set<ClientHandler> playerClients =
             Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final ConcurrentHashMap<Integer, CopyOnWriteArrayList<ClientHandler>> spectatorsByPlayer =
@@ -51,20 +83,31 @@ public final class Server {
             new ConcurrentHashMap<>();
 
     /* ========= Plantillas del Admin (Abstract Factory) ========= */
+    /** Factoría utilizada para crear elementos del juego, siguiendo el patrón **Abstract Factory**. */
     private final GameElementFactory factory = new DefaultFactory();
     private final CopyOnWriteArrayList<Enemy> templateEnemies = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<Fruit> templateFruits  = new CopyOnWriteArrayList<>();
 
     /* ========= Sesiones por jugador ========= */
+    /** Almacena la sesión de juego activa por cada ID de jugador. */
     private final ConcurrentHashMap<Integer, GameSession> sessions = new ConcurrentHashMap<>();
 
     /* ========= Mapa (ajústalo a tu tablero) ========= */
+    /** Límite inferior de la coordenada Y para el tablero de juego. */
     private static final int MIN_Y = 0, MAX_Y = 10;
     private static final int MIN_X = 0, MAX_X = 10;
 
     /* ========= Loop ========= */
+    /** Planificador de un solo hilo para ejecutar el {@link #tick()} a una velocidad constante. */
     private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
 
+    /**
+     * Inicializa el socket del servidor, lo enlaza al puerto y comienza a escuchar
+     * conexiones.
+     * <p>También inicia el *Game Loop* ({@link #tick()}) y el hilo de la consola
+     * de administración.</p>
+     * @throws IOException Si ocurre un error al abrir el socket del servidor.
+     */
     public void start() throws IOException {
         if (serverSocket != null && !serverSocket.isClosed()) return;
 
@@ -91,6 +134,17 @@ public final class Server {
     }
 
     /* ========= TICK: procesa inputs, simula enemigos y notifica ========= */
+    /**
+     * El ciclo principal de simulación del juego (Game Loop).
+     *
+     * <p>Se ejecuta a una tasa fija (controlada por {@link #ticker}) y realiza
+     * tres pasos principales:</p>
+     * <ol>
+     * <li>Procesar los inputs de la {@link #inputQueue} y actualizar la posición de los {@link Player}.</li>
+     * <li>Simular los enemigos y chequear eventos de juego (colisiones, recoger frutas, meta).</li>
+     * <li>Enviar el nuevo estado del juego a los jugadores y espectadores.</li>
+     * </ol>
+     */
     private void tick() {
         // 1) inputs → posiciones (con límites) + ack
         InputEvent ev;
@@ -173,6 +227,13 @@ public final class Server {
     }
 
     /* ========= API para ClientHandler ========= */
+    /**
+     * Maneja la solicitud de un cliente para unirse como jugador.
+     * <p>Asigna un nuevo ID, crea el objeto {@link Player} y una {@link GameSession},
+     * y notifica al cliente con el ID asignado.</p>
+     * @param c El manejador del cliente que solicita unirse.
+     * @param name El nombre de usuario del jugador.
+     */
     void onJoin(ClientHandler c, String name) {
         if (players.size() >= 2) { c.sendLine("ERR MAX_PLAYERS\n"); return; }
 
@@ -196,14 +257,32 @@ public final class Server {
         }
         System.out.println("[JAVA] JOIN -> id=" + id + " name=" + name);
     }
-
+    /**
+     * Maneja el input de movimiento de un jugador.
+     *
+     * <p>Crea un nuevo {@link InputEvent} y lo encola en la {@link #inputQueue}
+     * para su procesamiento en el siguiente {@link #tick()}.</p>
+     *
+     * @param c El manejador del cliente que envía el input.
+     * @param seq El número de secuencia del input.
+     * @param dx El desplazamiento en X.
+     * @param dy El desplazamiento en Y.
+     */
     void onInput(ClientHandler c, int seq, int dx, int dy) {
         Integer id = byClient.get(c);
         if (id == null) { c.sendLine("ERR NOT_JOINED\n"); return; }
         if (Math.abs(dx) > 1 || Math.abs(dy) > 1) { c.sendLine("ERR STEP_TOO_BIG\n"); return; }
         inputQueue.offer(new InputEvent(id, seq, dx, dy));
     }
-
+    /**
+     * Maneja la solicitud de un cliente para unirse como espectador.
+     *
+     * <p>Si el jugador existe, lo añade a la lista de espectadores. Si no,
+     * lo añade a la lista de espera ({@link #waitingSpectatorsByPlayer}).</p>
+     *
+     * @param c El manejador del cliente que solicita ser espectador.
+     * @param playerId El ID del jugador al que desea observar.
+     */
     void onSpectate(ClientHandler c, int playerId) {
         if (players.containsKey(playerId)) {
             var list = spectatorsByPlayer.computeIfAbsent(playerId, k -> new CopyOnWriteArrayList<>());
@@ -216,7 +295,11 @@ public final class Server {
         waitList.add(c);
         c.sendLine("OK WAITING " + playerId + "\n");
     }
-
+    /**
+     * Método llamado por el {@link ClientHandler} cuando su hilo termina (por error de I/O o desconexión).
+     *
+     * @param c El manejador del cliente a remover.
+     */
     void onQuit(ClientHandler c) {
         Integer id = byClient.remove(c);
         if (id != null) {
@@ -228,6 +311,14 @@ public final class Server {
     }
 
     /* ========= Utilidades ========= */
+    /**
+     * Finaliza la sesión de juego de un jugador específico.
+     * <p>Elimina el {@link Player} y la {@link GameSession}, notifica a sus
+     * espectadores, y fuerza el cierre de la conexión del {@link ClientHandler}
+     * asociado si aún está conectado.</p>
+     *
+     * @param playerId El ID del jugador cuya sesión debe terminar.
+     */
     private void endPlayerSession(int playerId) {
         // avisar a espectadores y limpiar
         var ls = spectatorsByPlayer.remove(playerId);
@@ -283,6 +374,11 @@ public final class Server {
     }
 
     /* ========= Consola Admin (Abstract Factory) ========= */
+    /**
+     * Bucle de ejecución para la consola de administración.
+     * <p>Lee comandos desde la entrada estándar (System.in) y los procesa
+     * en {@link #handleAdminCommand(String)}.</p>
+     */
     private void adminLoop() {
         try (Scanner sc = new Scanner(System.in)) {
             while (true) {
@@ -293,9 +389,18 @@ public final class Server {
         } catch (Exception ignored) {}
     }
 
-    // ADMIN CROCODILE <RED|BLUE> <liana> [y]
-    // ADMIN FRUIT CREATE <liana> <y> <points>
-    // ADMIN FRUIT DELETE <liana> <y>
+    /**
+     * Procesa comandos de administración ingresados por consola.
+     *
+     * <p>Permite al administrador crear plantillas de enemigos y frutas
+     * que serán clonadas en las nuevas {@link GameSession} (patrón Abstract Factory).</p>
+     * <ul>
+     * <li>Sintaxis ENEMIGO: <code>ADMIN CROCODILE &lt;RED|BLUE&gt; &lt;liana&gt; [y]</code></li>
+     * <li>Sintaxis FRUTA CREAR: <code>ADMIN FRUIT CREATE &lt;liana&gt; &lt;y&gt; &lt;points&gt;</code></li>
+     * <li>Sintaxis FRUTA BORRAR: <code>ADMIN FRUIT DELETE &lt;liana&gt; &lt;y&gt;</code></li>
+     * </ul>
+     * @param line El comando de administración completo.
+     */
     private void handleAdminCommand(String line) {
         try {
             String[] t = line.split("\\s+");
@@ -319,7 +424,16 @@ public final class Server {
             System.out.println("[ADMIN] Error: " + e.getMessage());
         }
     }
-
+    //Main
+    /**
+     * Punto de entrada principal para el servidor.
+     *
+     * <p>Configura un <b>Shutdown Hook</b> para asegurar el cierre correcto
+     * del servidor (llamando a {@link #stop()}) cuando la JVM se detiene
+     * (por ejemplo, con CTRL+C) e inicia el servidor.</p>
+     *
+     * @param args Argumentos de la línea de comandos (no utilizados).
+     */
     public static void main(String[] args) {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("[JAVA] Shutdown hook → cerrando servidor...");
