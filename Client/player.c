@@ -1,12 +1,22 @@
-// Ruta: Client/player.c
+// Client\player.c
+
+#include "raylib.h" // 1. Raylib PRIMERO
+
+// 2. Definiciones para evitar conflictos con Windows (NECESARIO)
+#define NOGDI               // Evita conflicto con la función Rectangle
+#define NOUSER              // Evita conflicto con CloseWindow y ShowCursor
+#define WIN32_LEAN_AND_MEAN // ¡NUEVO! Evita cargar cabeceras pesadas (como OLE/COM/LPMSG)
+#define NOMINMAX            // Evita conflicto con macros min/max
+
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <windows.h>
+#include <windows.h> // Ahora debería ser mucho más "ligero"
 #include <stdio.h>
 #include <string.h>
 #include "constants.h"
 #pragma comment(lib, "Ws2_32.lib")
+
 
 volatile int running = 1, myId = 0, lastAck = 0;
 
