@@ -1,4 +1,4 @@
-// Ruta: Server/Player.java
+// Server/Player.java
 package Server;
 
 public class Player {
@@ -8,6 +8,7 @@ public class Player {
     public int lastAckSeq;
     public int score;
     public int round;
+    public boolean gameOver;   
 
     public Player(int id, String name) {
         this.id = id;
@@ -16,7 +17,8 @@ public class Player {
         this.y = 0;
         this.lastAckSeq = 0;
         this.score = 0;
-        this.round = 1; // empieza en ronda 1
+        this.round = 1;
+        this.gameOver = false; //
     }
 }
 

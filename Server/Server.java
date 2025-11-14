@@ -171,10 +171,11 @@ public final class Server {
 
             // colisiones con enemigos → LOSE (juego termina para ese jugador)
             boolean hit = s.enemies.stream().anyMatch(en -> en.getX() == p.x && en.getY() == p.y);
-            if (hit) {
+            if (hit && !p.gameOver) {
+                // marcar fin de juego, pero NO cerrar la sesión aún
+                p.gameOver = true;
                 sendToPlayerAndSpectators(pid, "LOSE " + pid + " " + p.score + "\n");
-                // cerrar sesión de ese jugador
-                endPlayerSession(pid);
+                // seguimos enviando STATE/OBS para que vean la pantalla final
                 continue;
             }
 
@@ -269,11 +270,23 @@ public final class Server {
      * @param dy El desplazamiento en Y.
      */
     void onInput(ClientHandler c, int seq, int dx, int dy) {
-        Integer id = byClient.get(c);
-        if (id == null) { c.sendLine("ERR NOT_JOINED\n"); return; }
-        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) { c.sendLine("ERR STEP_TOO_BIG\n"); return; }
-        inputQueue.offer(new InputEvent(id, seq, dx, dy));
+    Integer id = byClient.get(c);
+    if (id == null) { c.sendLine("ERR NOT_JOINED\n"); return; }
+
+    Player p = players.get(id);
+    if (p == null) return;
+
+    // si ya perdió, no aceptamos más movimientos
+    if (p.gameOver) {
+        c.sendLine("ERR GAME_OVER\n");
+        return;
     }
+
+    // rate limit si ya lo tenías...
+
+    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) { c.sendLine("ERR STEP_TOO_BIG\n"); return; }
+    inputQueue.offer(new InputEvent(id, seq, dx, dy));
+}
     /**
      * Maneja la solicitud de un cliente para unirse como espectador.
      *
