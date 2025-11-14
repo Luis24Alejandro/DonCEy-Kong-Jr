@@ -157,12 +157,23 @@ int main(void){
     InitWindow(screenWidth, screenHeight, "DonCEy-Kong Jr - Jugador");
     SetTargetFPS(60);
 
+        // Cargar fondo
+    Texture2D bg = LoadTexture("assets/dkjr_bg.png");
+
+    // Escala para que el fondo ocupe toda la ventana
+    float scaleX = (float)screenWidth  / bg.width;
+    float scaleY = (float)screenHeight / bg.height;
+    // Si quieres mantener proporción, puedes usar el menor de los dos:
+    float scale = (scaleX < scaleY) ? scaleX : scaleY;
+
+
     // offset para centrar el mapa
-    const int cellSize = 40;
-    const int mapPixelW = MAP_W * cellSize;
-    const int mapPixelH = MAP_H * cellSize;
-    const int offsetX = (screenWidth  - mapPixelW) / 2;
-    const int offsetY = (screenHeight - mapPixelH) / 2;
+    const int cellSize = 32;   // 32 suele encajar mejor con sprites viejos; puedes dejar 40 si lo prefieres
+
+    // Estas son las coordenadas EN PANTALLA donde empieza la rejilla (esquina inferior izquierda del mapa)
+    const int offsetX = 80;    // AJUSTAR ESTOS DOS A OJO
+    const int offsetY = 120;   // HASTA QUE LOS BLOQUES CAIGAN DONDE DEBE
+
 
     int seq = 1;
 
@@ -170,19 +181,34 @@ int main(void){
         // ---- INPUT → enviar al servidor ----
         int dx = 0, dy = 0;
 
-        // Solo permitimos movimiento si NO ha perdido
-        if (!player.gameOver) {
-            if(IsKeyPressed(KEY_RIGHT)) dx = 1;
-            if(IsKeyPressed(KEY_LEFT))  dx = -1;
-            if(IsKeyPressed(KEY_UP))    dy = 1;
-            if(IsKeyPressed(KEY_DOWN))  dy = -1;
+        // 1) Caminar normal con flechas (si quieres mantenerlo)
+        if (IsKeyPressed(KEY_RIGHT)) dx = 1;
+        if (IsKeyPressed(KEY_LEFT))  dx = -1;
+        if (IsKeyPressed(KEY_UP))    dy = 1;
+        if (IsKeyPressed(KEY_DOWN))  dy = -1;
 
-            if(dx != 0 || dy != 0){
+        if (dx != 0 || dy != 0) {
+            char msg[SMALL_BUF];
+            sprintf(msg, "INPUT %d %d %d\n", seq++, dx, dy);
+            send(sock, msg, (int)strlen(msg), 0);
+        }
+
+        // 2) SALTO con ESPACIO + dirección
+        int jdx = 0, jdy = 0;
+        if (IsKeyPressed(KEY_SPACE)) {
+            // Dirección del salto según flechas que estén pulsadas AHORA
+            if (IsKeyDown(KEY_RIGHT))      jdx = 1;
+            else if (IsKeyDown(KEY_LEFT))  jdx = -1;
+            else if (IsKeyDown(KEY_UP))    jdy = 1;
+            // (si no hay flecha, no se hace nada)
+
+            if (jdx != 0 || jdy != 0) {
                 char msg[SMALL_BUF];
-                sprintf(msg, "INPUT %d %d %d\n", seq++, dx, dy);
+                sprintf(msg, "INPUT %d %d %d\n", seq++, jdx, jdy);
                 send(sock, msg, (int)strlen(msg), 0);
             }
         }
+
 
         // Tecla para salir de la partida (por ejemplo ENTER o ESC)
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
@@ -193,26 +219,31 @@ int main(void){
 
         // ---- DIBUJO ----
         BeginDrawing();
-        ClearBackground(DARKBLUE);
+        ClearBackground(BLACK);
 
-        // Fondo negro detrás del mapa
-        DrawRectangle(offsetX-4, offsetY-4, mapPixelW+8, mapPixelH+8, BLACK);
+        // Dibujar el fondo del juego
+        DrawTextureEx(bg, (Vector2){0, 0}, 0.0f, scale, WHITE);
 
         // Dibuja tiles del mapa
         for(int y=0; y<MAP_H; y++){
             for(int x=0; x<MAP_W; x++){
                 char t = MapGetTile(x, y);
                 int px = offsetX + x * cellSize;
-                int py = offsetY + (MAP_H-1 - y) * cellSize; // invertimos y para ver y=0 abajo
+                int py = offsetY + (MAP_H-1 - y) * cellSize;
 
-                Color c = DARKBROWN;
-                if(t == '.') continue;
-                else if(t == '=') c = BROWN;      // plataforma
-                else if(t == '|') c = DARKGREEN;  // liana
-                else if(t == 'G') c = RED;        // meta
-                else if(t == 'S') c = BLUE;       // spawn
+                Color c;
+                if (t == '.') continue;
+                else if (t == 'W') c = BLUE;           // agua
+                else if (t == 'T') c = BROWN;          // tierra que sale del agua
+                else if (t == '=') c = BROWN;          // plataforma
+                else if (t == '|') c = DARKGREEN;      // liana
+                else if (t == 'G') c = RED;            // jaula DK
+                else if (t == 'S') c = BLUE;           // spawn (lo puedes pintar distinto si quieres)
+                else c = DARKBROWN;
 
-                DrawRectangle(px, py, cellSize, cellSize, c);
+                DrawRectangle(px, py, cellSize, cellSize, Fade(c, 0.5f)); // 0.5f = semitransparente para ver el fondo
+
+
             }
         }
 

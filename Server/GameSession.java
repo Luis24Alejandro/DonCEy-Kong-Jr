@@ -13,17 +13,21 @@ import Server.entities.SimpleFruit;
 
 public class GameSession {
     public final int playerId;
+    public int spawnX, spawnY;
+    public int goalX, goalY;
     public final CopyOnWriteArrayList<Enemy> enemies = new CopyOnWriteArrayList<>();
     public final CopyOnWriteArrayList<Fruit> fruits  = new CopyOnWriteArrayList<>();
 
     // “Velocidad lógica” de enemigos para este jugador (pasos por tick)
     public int enemySpeedSteps = 1;
 
-    // Meta y spawn (ajústalos a tu mapa real)
-    public final int spawnX = 0, spawnY = 0;
-    public final int goalX  = 10, goalY  = 10;
-
-    public GameSession(int playerId) { this.playerId = playerId; }
+    public GameSession(int playerId) { 
+        this.playerId = playerId;
+        this.spawnX = 0;  // S está en x=0, y=1
+        this.spawnY = 1;
+        this.goalX  = 2;  // “GGG” empieza en x=2, y=10
+        this.goalY  = 10; 
+    }
 
     /** Clona listas plantilla del servidor a esta sesión */
     public void loadFromTemplates(List<Enemy> tplEnemies, List<Fruit> tplFruits) {

@@ -97,6 +97,43 @@ public final class Server {
     private static final int MIN_Y = 0, MAX_Y = 10;
     private static final int MIN_X = 0, MAX_X = 10;
 
+    // Mapa lógico (igual que en map.h). y=0 es la fila de abajo.
+    private static final char[][] MAP = {
+        "WWTWWTWTWWW".toCharArray(), // y=0
+        "S==..=T..==".toCharArray(), // y=1
+        "..|.......=".toCharArray(), // y=2
+        "..|..===..=".toCharArray(), // y=3
+        "..|..|.....".toCharArray(), // y=4
+        "..|..|..===".toCharArray(), // y=5
+        "..|..|.....".toCharArray(), // y=6
+        "..===|.....".toCharArray(), // y=7
+        ".....|..===".toCharArray(), // y=8
+        ".....|.....".toCharArray(), // y=9
+        "..GGG===...".toCharArray()  // y=10
+};
+
+
+    private static char tileAt(int x, int y) {
+        if (x < MIN_X || x > MAX_X || y < MIN_Y || y > MAX_Y) return '.';
+        return MAP[y][x];
+    }
+
+    private static boolean isWater(int x, int y) {
+    return tileAt(x, y) == 'W';
+    }
+
+    // Donde el jugador PUEDE estar de pie / colgado
+    private static boolean isSolidTile(char t) {
+        return t == 'T'   // tierra que sale del agua
+            || t == '='   // plataforma
+            || t == '|'   // liana (colgado)
+            || t == 'S'   // spawn
+            || t == 'G';  // meta (jaula DK)
+    }
+
+
+
+
     /* ========= Loop ========= */
     /** Planificador de un solo hilo para ejecutar el {@link #tick()} a una velocidad constante. */
     private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
@@ -156,6 +193,29 @@ public final class Server {
             if (ny < MIN_Y) ny = MIN_Y; if (ny > MAX_Y) ny = MAX_Y;
             p.x = nx; p.y = ny; p.lastAckSeq = Math.max(p.lastAckSeq, ev.seq);
         }
+
+        // 1b) GRAVEDAD + agua
+        sessions.forEach((pid, session) -> {
+            Player p = players.get(pid);
+            if (p == null) return;
+
+            // Gravedad: si no hay soporte debajo, cae una casilla
+            if (p.y > MIN_Y) {
+                char below = tileAt(p.x, p.y - 1);
+                if (!isSolidTile(below)) {
+                    p.y -= 1;
+                }
+            }
+
+            // Si llegó al agua (ya sea por caída o por movimiento directo) -> respawn
+            if (isWater(p.x, p.y)) {
+                p.x = session.spawnX;
+                p.y = session.spawnY;
+                System.out.println("[JAVA] Jugador " + pid + " cayo al agua -> respawn");
+            }
+        });
+
+
 
         // 2) simular enemigos por sesión y chequear eventos de juego
         for (var e : sessions.entrySet()) {
