@@ -1,0 +1,31 @@
+# === JAVA ===
+*.class
+*.jar
+*.war
+*.ear
+bin/
+out/
+build/
+
+# === C & C++ ===
+*.exe
+*.out
+*.o
+*.obj
+*.dll
+*.a
+*.so
+
+# === VS CODE ===
+.vscode/
+
+# === SISTEMA OPERATIVO ===
+$RECYCLE.BIN/
+
+# === TEMPORALES ===
+*.tmp
+*.temp
+*.log
+
+# === BACKUPS ===
+*~
