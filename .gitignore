@@ -12,8 +12,8 @@ build/
 *.out
 *.o
 *.obj
-*.dll
-*.a
+#*.dll
+#*.a
 *.so
 
 # === VS CODE ===
